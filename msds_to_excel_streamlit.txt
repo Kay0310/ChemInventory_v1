@@ -1,0 +1,76 @@
+
+import pytesseract
+from PIL import Image, ImageEnhance, ImageFilter
+import pandas as pd
+import re
+import os
+import shutil
+import streamlit as st
+import tempfile
+
+# === OCR 전처리 ===
+def preprocess_image(image):
+    image = image.convert('L')
+    image = image.filter(ImageFilter.MedianFilter())
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(2)
+    return image
+
+# === 제품명 추출 ===
+def extract_product_name(image):
+    image = preprocess_image(image)
+    text = pytesseract.image_to_string(image)
+    match = re.search(r"Product identifier.*?:\s*(.*)", text)
+    return match.group(1).strip() if match else "UNKNOWN"
+
+# === 화학물질 추출 ===
+def extract_chemical_data(image):
+    image = preprocess_image(image)
+    text = pytesseract.image_to_string(image)
+    lines = text.split("\n")
+    data = []
+    for line in lines:
+        if re.search(r"\d{2,5}-\d{2}-\d", line):
+            parts = re.split(r"\s{2,}|\t+", line.strip())
+            if len(parts) >= 4:
+                data.append(parts[:4])
+            elif len(parts) == 3:
+                data.append([parts[0], "None", parts[1], parts[2]])
+    return data
+
+# === Streamlit UI ===
+st.title("🧪 MSDS 이미지 → 화학물질 인벤토리 자동 추출")
+
+product_img = st.file_uploader("제품명이 포함된 이미지 업로드", type=["png", "jpg", "jpeg"], key="product")
+table_img = st.file_uploader("화학물질 테이블 이미지 업로드", type=["png", "jpg", "jpeg"], key="table")
+
+if product_img and table_img:
+    with tempfile.NamedTemporaryFile(delete=False) as f1, tempfile.NamedTemporaryFile(delete=False) as f2:
+        f1.write(product_img.read())
+        f2.write(table_img.read())
+
+        p_image = Image.open(f1.name)
+        t_image = Image.open(f2.name)
+
+        product_name = extract_product_name(p_image)
+        chemical_data = extract_chemical_data(t_image)
+
+        if chemical_data:
+            df = pd.DataFrame(chemical_data, columns=[
+                "3.화학물질명(필수)", "4.관용명및이명", "5.CAS번호", "21.함유량"
+            ])
+            df.insert(0, "2.제품명", product_name)
+
+            st.success(f"✅ 제품명: {product_name}")
+            st.dataframe(df)
+
+            # 다운로드 버튼
+            csv = df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 결과 Excel 다운로드",
+                data=csv,
+                file_name="msds_inventory.csv",
+                mime="text/csv",
+            )
+        else:
+            st.warning("❗ 화학물질 데이터를 인식하지 못했습니다. 이미지 품질을 확인해주세요.")
